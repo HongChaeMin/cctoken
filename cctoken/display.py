@@ -196,15 +196,15 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
 _SPARKS = " ▁▂▃▄▅▆▇█"
 
 
-def _sparkline(values: list[int], color_high: str = "magenta") -> Text:
-    """Render a sparkline. Width = len(values)."""
+def _sparkline(values: list[int], color_high: str = "magenta", repeat: int = 1) -> Text:
+    """Render a sparkline. Width = len(values) * repeat."""
     max_val = max(values) if values else 0
     t = Text()
     for v in values:
         idx = int(v / max_val * 8) if max_val else 0
-        char = _SPARKS[idx]
+        char = _SPARKS[idx] * repeat
         if idx == 0:
-            t.append(char or " ", style="dim")
+            t.append(char or " " * repeat, style="dim")
         elif idx < 3:
             t.append(char, style="cyan")
         elif idx < 6:
@@ -229,19 +229,21 @@ def _hour_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
 
 
 def _today_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
-    """24 hourly buckets for today. Returns (values, axis_str)."""
+    """24 hourly buckets for today. Returns (values, axis_str).
+    Each hour is rendered 2-chars wide → axis is 48 chars."""
     now = datetime.now().astimezone()
     hourly = [0] * 24
     for r in records:
         local = r.timestamp.astimezone()
         if local.date() == now.date():
             hourly[local.hour] += r.display_tokens
-    # axis: one char per hour, labels at 0,6,12,18,23
-    axis = list(" " * 24)
+    # 2 chars per hour → 48 chars total; labels at 0,6,12,18,23
+    axis = list("  " * 24)
     for h, label in [(0, "0"), (6, "6"), (12, "12"), (18, "18"), (23, "23")]:
+        idx = h * 2
         for j, ch in enumerate(label):
-            if h + j < 24:
-                axis[h + j] = ch
+            if idx + j < 48:
+                axis[idx + j] = ch
     return hourly, "".join(axis)
 
 
@@ -278,7 +280,7 @@ def _month_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
 def _stat_card(
     title: str, emoji: str,
     tokens: int, cost: float, has_unknown: bool,
-    spark_values: list[int],
+    spark: Text,
     axis: str | None = None,
     subtitle: str | None = None,
     border: str = "cyan",
@@ -299,8 +301,7 @@ def _stat_card(
         sub = Text(subtitle, justify="center", style="dim")
         parts.append(sub)
 
-    # Sparkline
-    spark = _sparkline(spark_values)
+    # Sparkline (pre-rendered Text)
     parts.append(Align.center(spark))
 
     # Axis string below sparkline
@@ -427,16 +428,17 @@ def _build_watch_renderable(records: list[TokenRecord], config: Config, term_wid
     week_vals, week_lbls   = _week_buckets(records)
     month_vals, month_lbls = _month_buckets(records)
 
-    def make_card(title, emoji, recs, spark, axis=None, subtitle=None, border="cyan"):
+    def make_card(title, emoji, recs, spark, axis=None, subtitle=None, border="cyan", spark_repeat=1):
         tokens, _ = _sum_tokens(recs)
         cost, unk  = _sum_cost(recs)
-        return _stat_card(title, emoji, tokens, cost, unk, spark, axis, subtitle, border)
+        spark_text = _sparkline(spark, repeat=spark_repeat)
+        return _stat_card(title, emoji, tokens, cost, unk, spark_text, axis, subtitle, border)
 
     stat_panels = [
         make_card("Hour",       "⚡", hour_r,  hour_vals,
                   subtitle=hour_range,  border="bright_cyan"),
         make_card("Today",      "☀️ ", today_r, today_vals,
-                  axis=today_axis,      border="cyan"),
+                  axis=today_axis,      border="cyan", spark_repeat=2),
         make_card("This Week",  "📅", week_r,  week_vals,
                   axis=week_lbls,       border="blue"),
         make_card("This Month", "📆", month_r, month_vals,
@@ -461,11 +463,14 @@ def _build_watch_renderable(records: list[TokenRecord], config: Config, term_wid
 def show_watch(interval: int = 5) -> None:
     """Live-refresh dashboard. Ctrl+C to exit."""
     import shutil
+    import sys
     from cctoken.parser import load_all_records
     from cctoken.config import load_config
 
-    # Use screen=False to avoid alternate-buffer mouse scroll issues.
-    # Create a fresh Console each iteration so terminal resize is respected.
+    # Disable mouse tracking so scroll events don't leak as escape sequences
+    sys.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+    sys.stdout.flush()
+
     watch_console = Console()
 
     with Live(
