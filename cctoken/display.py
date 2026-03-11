@@ -229,22 +229,27 @@ def _hour_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
 
 
 def _today_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
-    """24 hourly buckets for today. Returns (values, axis_str).
-    Each hour is rendered 2-chars wide → axis is 48 chars."""
+    """24 hourly buckets for today. Returns (values, axis_placeholder).
+    Axis is built dynamically in _build_watch_renderable using the actual repeat value."""
     now = datetime.now().astimezone()
     hourly = [0] * 24
     for r in records:
         local = r.timestamp.astimezone()
         if local.date() == now.date():
             hourly[local.hour] += r.display_tokens
-    # 2 chars per hour → 48 chars total; labels at 0,6,12,18,23
-    axis = list("  " * 24)
+    return hourly, ""
+
+
+def _today_axis(repeat: int) -> str:
+    """Build Today hour axis with the given char repeat per bucket."""
+    width = 24 * repeat
+    axis = [" "] * width
     for h, label in [(0, "0"), (6, "6"), (12, "12"), (18, "18"), (23, "23")]:
-        idx = h * 2
+        idx = h * repeat
         for j, ch in enumerate(label):
-            if idx + j < 48:
+            if idx + j < width:
                 axis[idx + j] = ch
-    return hourly, "".join(axis)
+    return "".join(axis)
 
 
 def _week_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
@@ -431,17 +436,24 @@ def _build_watch_renderable(
     week_vals, week_lbls   = _week_buckets(records)
     month_vals, month_lbls = _month_buckets(records)
 
-    def make_card(title, emoji, recs, spark, axis=None, subtitle=None, border="cyan", spark_repeat=1):
+    # Dynamic repeat: fill ~panel inner width for each sparkline
+    # panel_inner ≈ (term_width - 4 panels × 3 borders) // 4 - 2 padding
+    panel_inner = max(10, (term_width - 16) // 4)
+
+    def repeat_for(buckets: list[int]) -> int:
+        return max(1, panel_inner // len(buckets))
+
+    def make_card(title, emoji, recs, spark, axis=None, subtitle=None, border="cyan"):
         tokens, _ = _sum_tokens(recs)
         cost, unk  = _sum_cost(recs)
-        spark_text = _sparkline(spark, repeat=spark_repeat)
+        spark_text = _sparkline(spark, repeat=repeat_for(spark))
         return _stat_card(title, emoji, tokens, cost, unk, spark_text, axis, subtitle, border)
 
     stat_panels = [
         make_card("Hour",       "⚡", hour_r,  hour_vals,
                   subtitle=hour_range,  border="bright_cyan"),
         make_card("Today",      "☀️ ", today_r, today_vals,
-                  axis=today_axis,      border="cyan", spark_repeat=2),
+                  axis=_today_axis(repeat_for(today_vals)), border="cyan"),
         make_card("This Week",  "📅", week_r,  week_vals,
                   axis=week_lbls,       border="blue"),
         make_card("This Month", "📆", month_r, month_vals,
