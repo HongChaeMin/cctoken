@@ -323,7 +323,7 @@ def _stat_card(
 
 # ── Project bars ──────────────────────────────────────────────────────────────
 
-def _project_bars(records: list[TokenRecord], max_rows: int = 6, bar_width: int = 20) -> Panel:
+def _project_bars(records: list[TokenRecord], max_rows: int = 6, bar_width: int = 20) -> Panel | None:
     groups = group_by_project(records)
     rows = []
     for proj, recs in groups.items():
@@ -406,7 +406,10 @@ def _status_bar(records: list[TokenRecord], config: Config, now: datetime) -> Te
 
 # ── Main renderable ───────────────────────────────────────────────────────────
 
-def _build_watch_renderable(records: list[TokenRecord], config: Config, term_width: int = 120):
+def _build_watch_renderable(
+    records: list[TokenRecord], config: Config,
+    term_width: int = 120, term_height: int = 40,
+):
     from rich.console import Group as RGroup
 
     now = datetime.now().astimezone()
@@ -445,8 +448,11 @@ def _build_watch_renderable(records: list[TokenRecord], config: Config, term_wid
                   axis=month_lbls,      border="magenta"),
     ]
 
-    # ── Projects ──────────────────────────────────────────────────────────────
-    proj_panel = _project_bars(month_r)
+    # ── Projects (adaptive rows based on terminal height) ─────────────────────
+    # Fixed overhead: header(3) + stat cards(8) + status bar(3) + project panel borders(2) = 16
+    FIXED_LINES = 16
+    max_proj_rows = max(0, term_height - FIXED_LINES)
+    proj_panel = _project_bars(month_r, max_rows=max_proj_rows) if max_proj_rows > 0 else None
 
     # ── Status bar ────────────────────────────────────────────────────────────
     status_panel = Panel(
@@ -455,7 +461,11 @@ def _build_watch_renderable(records: list[TokenRecord], config: Config, term_wid
         padding=(0, 0),
     )
 
-    return RGroup(header_panel, Columns(stat_panels, equal=True, expand=True), proj_panel, status_panel)
+    parts = [header_panel, Columns(stat_panels, equal=True, expand=True)]
+    if proj_panel is not None:
+        parts.append(proj_panel)
+    parts.append(status_panel)
+    return RGroup(*parts)
 
 
 # ── Watch entry point ─────────────────────────────────────────────────────────
@@ -483,9 +493,12 @@ def show_watch(interval: int = 5) -> None:
         while True:
             now = time.monotonic()
             if now >= next_refresh:
-                cols = shutil.get_terminal_size().columns
+                term = shutil.get_terminal_size()
                 records = load_all_records()
                 config  = load_config()
-                live.update(_build_watch_renderable(records, config, term_width=cols))
+                live.update(_build_watch_renderable(
+                    records, config,
+                    term_width=term.columns, term_height=term.lines,
+                ))
                 next_refresh = now + interval
             time.sleep(0.25)
