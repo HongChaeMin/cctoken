@@ -371,6 +371,98 @@ def _project_bars(records: list[TokenRecord], max_rows: int = 6, bar_width: int 
     )
 
 
+# ── Velocity panel ────────────────────────────────────────────────────────────
+
+def _next_reset(reset_day: int, now: datetime) -> datetime:
+    """Return the next billing reset datetime (same time as now, on reset_day)."""
+    from datetime import timedelta
+    import calendar
+    candidate = now.replace(day=reset_day, hour=0, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        # roll to next month
+        year = now.year + (now.month // 12)
+        month = (now.month % 12) + 1
+        last_day = calendar.monthrange(year, month)[1]
+        candidate = candidate.replace(year=year, month=month, day=min(reset_day, last_day))
+    return candidate
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    d, s = divmod(seconds, 86400)
+    h, s = divmod(s, 3600)
+    m = s // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
+def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime) -> Panel:
+    from rich.console import Group as RGroup
+    from datetime import timedelta
+
+    # Burn rate: tokens in the last 24 hours
+    cutoff_24h = now - timedelta(hours=24)
+    recent = [r for r in records if r.timestamp.astimezone() >= cutoff_24h]
+    tokens_24h, _ = _sum_tokens(recent)
+    burn_per_hour = tokens_24h / 24
+
+    lines: list = []
+
+    # Burn rate line
+    rate_line = Text()
+    rate_line.append("🔥 ", style="")
+    rate_line.append(f"{burn_per_hour:,.0f}", style="bold yellow")
+    rate_line.append(" tok/hr", style="dim")
+    rate_line.append("  (last 24h avg)", style="dim")
+    lines.append(rate_line)
+
+    # Budget depletion estimate
+    if config.monthly_token_budget is not None:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_r = [r for r in records if r.timestamp.astimezone() >= month_start]
+        used, _ = _sum_tokens(month_r)
+        remaining = config.monthly_token_budget - used
+
+        dep_line = Text()
+        if burn_per_hour > 0 and remaining > 0:
+            hours_left = remaining / burn_per_hour
+            dep_line.append("📉 ", style="")
+            dep_line.append("budget runs out in ", style="dim")
+            dep_line.append(_fmt_duration(hours_left * 3600), style="bold red" if hours_left < 24 else "bold cyan")
+            dep_line.append(f"  ({remaining:,} tok left)", style="dim")
+        elif remaining <= 0:
+            dep_line.append("🚨 ", style="")
+            dep_line.append("budget exhausted", style="bold red")
+        else:
+            dep_line.append("📉 ", style="")
+            dep_line.append("no recent activity to estimate", style="dim")
+        lines.append(dep_line)
+
+    # Reset countdown
+    if config.billing_reset_day is not None:
+        reset_dt = _next_reset(config.billing_reset_day, now)
+        secs_left = (reset_dt - now).total_seconds()
+        reset_line = Text()
+        reset_line.append("🔄 ", style="")
+        reset_line.append("resets in ", style="dim")
+        reset_line.append(_fmt_duration(secs_left), style="bold green")
+        reset_line.append(f"  ({reset_dt.strftime('%b %d')})", style="dim")
+        lines.append(reset_line)
+    else:
+        hint = Text("💡 run: cctoken budget reset-day <day>  to show reset countdown", style="dim italic")
+        lines.append(hint)
+
+    return Panel(
+        RGroup(*lines),
+        title="[bold]📊 Rate & Reset[/bold]",
+        border_style="yellow",
+        padding=(0, 1),
+    )
+
+
 # ── Status bar ────────────────────────────────────────────────────────────────
 
 def _status_bar(records: list[TokenRecord], config: Config, now: datetime) -> Text:
@@ -473,7 +565,10 @@ def _build_watch_renderable(
         padding=(0, 0),
     )
 
-    parts = [header_panel, Columns(stat_panels, equal=True, expand=True)]
+    # ── Velocity ───────────────────────────────────────────────────────────────
+    velocity_panel = _velocity_panel(records, config, now)
+
+    parts = [header_panel, Columns(stat_panels, equal=True, expand=True), velocity_panel]
     if proj_panel is not None:
         parts.append(proj_panel)
     parts.append(status_panel)

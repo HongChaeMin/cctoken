@@ -11,7 +11,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from cctoken.parser import load_all_records
-from cctoken.config import load_config, save_budget
+from cctoken.config import load_config, save_budget, save_reset_day
 from cctoken.display import show_summary, show_projects, show_trend, show_budget, show_watch
 
 
@@ -51,6 +51,16 @@ def cmd_budget(args):
         records = load_all_records()
         config = load_config()
         show_budget(records, config)
+    elif args.budget_cmd == "reset-day":
+        try:
+            day = int(args.day)
+            if not 1 <= day <= 28:
+                raise ValueError
+        except (ValueError, TypeError):
+            print("Error: day must be 1–28.", file=sys.stderr)
+            sys.exit(1)
+        save_reset_day(day)
+        print(f"Billing reset day set to {day} (every month on the {day}th)")
 
 
 def main():
@@ -69,6 +79,8 @@ def main():
     set_p = budget_sub.add_parser("set", help="Set monthly token budget")
     set_p.add_argument("tokens", help="Token budget (e.g. 5000000)")
     budget_sub.add_parser("show", help="Show budget and current usage")
+    reset_p = budget_sub.add_parser("reset-day", help="Set the day of month when tokens reset (1–28)")
+    reset_p.add_argument("day", help="Day of month (e.g. 1 for 1st, 15 for 15th)")
 
     args = parser.parse_args()
 
