@@ -53,6 +53,18 @@ cctoken budget show         # Show budget usage | 예산 사용 현황
 - 터미널 크기에 따라 레이아웃 자동 조절
 - `Ctrl+C`로 종료
 
+## Claude Code Integration / Claude Code 연동
+
+See [docs/claude-code-integration.md](docs/claude-code-integration.md) for:
+- How cctoken reads Claude Code session data
+- Setting up a Stop hook to auto-show stats after each session
+- Live monitoring setup
+
+[docs/claude-code-integration.md](docs/claude-code-integration.md) 문서에서 확인:
+- cctoken이 Claude Code 데이터를 읽는 방식
+- 세션 종료 시 자동 실행을 위한 Stop 훅 설정
+- 라이브 모니터링 설정
+
 ## Requirements / 요구사항
 
 - Python 3.10+
