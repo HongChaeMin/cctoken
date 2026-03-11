@@ -88,6 +88,15 @@ def _to_local(dt: datetime) -> datetime:
     return dt.astimezone()
 
 
+def filter_this_hour(records: list[TokenRecord]) -> list[TokenRecord]:
+    now = datetime.now().astimezone()
+    return [
+        r for r in records
+        if _to_local(r.timestamp).date() == now.date()
+        and _to_local(r.timestamp).hour == now.hour
+    ]
+
+
 def filter_today(records: list[TokenRecord]) -> list[TokenRecord]:
     now = datetime.now().astimezone()
     today = now.date()

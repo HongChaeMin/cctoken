@@ -12,7 +12,7 @@ from rich.align import Align
 from rich import box
 
 from cctoken.parser import (
-    TokenRecord, filter_today, filter_this_week,
+    TokenRecord, filter_this_hour, filter_today, filter_this_week,
     filter_this_month, filter_last_7_days, group_by_project
 )
 from cctoken.pricing import calculate_cost, format_cost, UNKNOWN_COST
@@ -192,104 +192,265 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
     console.print()
 
 
-def _build_watch_renderable(records: list[TokenRecord], config: Config, refresh_count: int):
-    """Build the full watch display as a single renderable."""
+# Sparkline block characters (9 levels)
+_SPARKS = " ▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[int], width: int = 16, color_high: str = "magenta") -> Text:
+    """Render a sparkline from a list of values using block chars."""
+    if not values:
+        return Text("─" * width, style="dim")
+
+    # Pad or truncate to width
+    if len(values) < width:
+        values = [0] * (width - len(values)) + values
+    elif len(values) > width:
+        values = values[-width:]
+
+    max_val = max(values) or 1
+    t = Text()
+    for v in values:
+        idx = int(v / max_val * 8)
+        char = _SPARKS[idx]
+        if idx == 0:
+            t.append(char or " ", style="dim")
+        elif idx < 3:
+            t.append(char, style="cyan")
+        elif idx < 6:
+            t.append(char, style="bright_cyan")
+        else:
+            t.append(char, style=f"bold {color_high}")
+    return t
+
+
+def _hour_spark(records: list[TokenRecord]) -> tuple[list[int], list[str]]:
+    """Returns (values, labels) for 5-min buckets of current hour."""
+    now = datetime.now().astimezone()
+    buckets = [0] * 12
+    for r in records:
+        local = r.timestamp.astimezone()
+        if local.date() == now.date() and local.hour == now.hour:
+            bucket = local.minute // 5
+            buckets[bucket] += r.display_tokens
+    labels = [f"{now.hour:02d}:{m*5:02d}" for m in range(12)]
+    return buckets, labels
+
+
+def _today_spark(records: list[TokenRecord]) -> list[int]:
+    """Returns hourly token counts (24 values) for today."""
+    now = datetime.now().astimezone()
+    hourly = [0] * 24
+    for r in records:
+        local = r.timestamp.astimezone()
+        if local.date() == now.date():
+            hourly[local.hour] += r.display_tokens
+    return hourly
+
+
+def _week_spark(records: list[TokenRecord]) -> tuple[list[int], list[str]]:
+    """Returns (values, day-labels) for Mon–Sun of current week."""
+    now = datetime.now().astimezone()
+    from datetime import timedelta
+    week_start = (now - timedelta(days=now.weekday())).date()
+    days = [(week_start + timedelta(days=i)) for i in range(7)]
+    daily: dict = {d: 0 for d in days}
+    for r in records:
+        d = r.timestamp.astimezone().date()
+        if d in daily:
+            daily[d] += r.display_tokens
+    labels = ["M", "T", "W", "T", "F", "S", "S"]
+    return [daily[d] for d in days], labels
+
+
+def _month_spark(records: list[TokenRecord]) -> tuple[list[int], list[str]]:
+    """Returns (values, week-labels) split into 4-week buckets for this month."""
+    now = datetime.now().astimezone()
+    month_start = now.replace(day=1).date()
+    # Group by week-of-month (0..3+)
+    buckets = [0] * 5
+    labels = ["W1", "W2", "W3", "W4", "W5"]
+    for r in records:
+        d = r.timestamp.astimezone().date()
+        if d >= month_start and d.month == now.month:
+            week_idx = min((d.day - 1) // 7, 4)
+            buckets[week_idx] += r.display_tokens
+    return buckets, labels
+
+
+def _stat_card(
+    title: str,
+    tokens: int,
+    cost: float,
+    has_unknown: bool,
+    spark_values: list[int],
+    spark_labels: list[str] | None = None,
+    border: str = "cyan",
+) -> Panel:
+    """A stat card with sparkline graph."""
+    cost_str = "~$?.??" if has_unknown else format_cost(cost)
+
+    content = Text(justify="center")
+    content.append(f"{tokens:,}", style="bold cyan")
+    content.append(" tok\n", style="dim")
+
+    # Sparkline row
+    spark = _sparkline(spark_values, width=len(spark_values), color_high="magenta")
+    spark_centered = Align.center(spark)
+
+    # Label row (optional, short)
+    if spark_labels and len(spark_labels) <= 12:
+        lbl = Text(justify="center")
+        for i, l in enumerate(spark_labels):
+            lbl.append(l, style="dim")
+            if i < len(spark_labels) - 1:
+                lbl.append(" ", style="dim")
+        label_row = Align.center(lbl)
+    else:
+        label_row = None
+
+    cost_text = Text(justify="center")
+    cost_text.append(cost_str, style="bold green")
+
+    from rich.console import Group as RGroup
+    parts = [content, spark_centered]
+    if label_row:
+        parts.append(label_row)
+    parts.append(cost_text)
+
+    return Panel(
+        Align.center(RGroup(*parts)),
+        title=f"[bold]{title}[/bold]",
+        border_style=border,
+        padding=(0, 1),
+    )
+
+
+def _project_bars(records: list[TokenRecord]) -> Panel:
+    """Project leaderboard with inline horizontal token bars."""
+    groups = group_by_project(records)
+    rows = []
+    for proj, recs in groups.items():
+        tokens, _ = _sum_tokens(recs)
+        cost, has_unknown = _sum_cost(recs)
+        cost_str = "~$?.??" if has_unknown else format_cost(cost)
+        rows.append((proj, tokens, cost_str))
+
+    rows.sort(key=lambda x: -x[1])
+    rows = rows[:7]
+    if not rows:
+        return Panel(Text("No data this month", style="dim"), title="[bold]Projects[/bold]", border_style="dim")
+
+    max_tok = rows[0][1] or 1
+    bar_width = 24
+
+    content = Text()
+    for i, (proj, tokens, cost_str) in enumerate(rows):
+        filled = int(tokens / max_tok * bar_width)
+        empty = bar_width - filled
+
+        # Rank color
+        rank_colors = ["bold yellow", "bold white", "dim white"] + ["dim"] * 10
+        rank_style = rank_colors[i]
+
+        content.append(f"  {proj:<22}", style="magenta")
+        content.append(" ")
+        content.append("█" * filled, style="cyan")
+        content.append("░" * empty, style="dim")
+        content.append(f"  {tokens:>8,}", style="bold cyan")
+        content.append(f"  {cost_str}", style="green")
+        if i < len(rows) - 1:
+            content.append("\n")
+
+    return Panel(
+        content,
+        title="[bold]Projects[/bold] [dim](month-to-date)[/dim]",
+        border_style="dim",
+    )
+
+
+def _status_bar(records: list[TokenRecord], config: Config, now: datetime) -> Text:
+    """Claude Code-style bottom status bar — single line, no wrapping."""
+    month_r = filter_this_month(records)
+    used, _ = _sum_tokens(month_r)
+    cost_total, _ = _sum_cost(month_r)
+    cost_str = format_cost(cost_total)
+
+    bar = Text(no_wrap=True, overflow="ellipsis")
+
+    if config.monthly_token_budget is not None:
+        budget = config.monthly_token_budget
+        pct = min(used / budget, 1.0)
+        bar_width = 28
+        filled = int(bar_width * pct)
+        color = "green" if pct < 0.70 else ("yellow" if pct < 0.90 else "red")
+
+        bar.append(" ▐", style="dim")
+        bar.append("█" * filled, style=color)
+        bar.append("░" * (bar_width - filled), style="dim")
+        bar.append("▌", style="dim")
+        bar.append(f" {pct*100:.1f}%", style=f"bold {color}")
+        bar.append(f"  {used:,} / {budget:,} tok", style="dim")
+    else:
+        bar.append(f"  ◈ {used:,} tok this month", style="cyan")
+
+    bar.append("   ·   ", style="dim")
+    bar.append(cost_str, style="green")
+    bar.append(" est.", style="dim")
+    bar.append("   ·   ", style="dim")
+    bar.append(f"⟳ {now.strftime('%H:%M:%S')}", style="dim")
+    bar.append("   ·   ", style="dim")
+    bar.append("Ctrl+C to exit", style="dim")
+    return bar
+
+
+def _build_watch_renderable(records: list[TokenRecord], config: Config):
+    """Build the full watch display."""
     from rich.console import Group as RGroup
 
     now = datetime.now().astimezone()
 
+    hour_r = filter_this_hour(records)
     today_r = filter_today(records)
     week_r = filter_this_week(records)
     month_r = filter_this_month(records)
 
-    # ── Top header ──────────────────────────────────────────────────────────
+    # ── Header ──────────────────────────────────────────────────────────────
+    ts = now.strftime("%Y-%m-%d  %H:%M:%S")
     header = Text(justify="center")
-    header.append(" ◆ ", style="bold magenta")
+    header.append("◆ ", style="bright_magenta")
     header.append("Claude Code Token Monitor", style="bold white")
-    header.append(" ◆ ", style="bold magenta")
-    header_panel = Panel(
-        Align.center(header),
-        border_style="bright_magenta",
-        padding=(0, 2),
-    )
+    header.append("  ◆  ", style="dim")
+    header.append(ts, style="dim")
+    header_panel = Panel(Align.center(header), border_style="bright_magenta", padding=(0, 0))
 
-    # ── Stat columns ────────────────────────────────────────────────────────
-    stat_panels = []
-    for label, recs in [("Today", today_r), ("This Week", week_r), ("This Month", month_r)]:
-        tokens, cache = _sum_tokens(recs)
+    # ── Stat cards ──────────────────────────────────────────────────────────
+    hour_vals, _ = _hour_spark(records)
+    today_vals = _today_spark(records)
+    week_vals, week_lbls = _week_spark(records)
+    month_vals, month_lbls = _month_spark(records)
+
+    def card(title, recs, spark_vals, spark_lbls, border="cyan"):
+        tokens, _ = _sum_tokens(recs)
         cost, has_unknown = _sum_cost(recs)
-        cost_str = "~$?.??" if has_unknown else format_cost(cost)
+        return _stat_card(title, tokens, cost, has_unknown, spark_vals, spark_lbls, border)
 
-        content = Text(justify="center")
-        content.append(f"{tokens:,}\n", style="bold cyan")
-        content.append("tokens\n", style="dim")
-        content.append(f"{cache:,}\n", style="blue")
-        content.append("cached\n", style="dim")
-        content.append(cost_str, style="bold green")
-        stat_panels.append(Panel(
-            Align.center(content),
-            title=f"[bold]{label}[/bold]",
-            border_style="cyan",
-            padding=(0, 1),
-        ))
+    stat_panels = [
+        card("Hour",       hour_r,  hour_vals,  None,       border="bright_cyan"),
+        card("Today",      today_r, today_vals, None,       border="cyan"),
+        card("This Week",  week_r,  week_vals,  week_lbls,  border="blue"),
+        card("This Month", month_r, month_vals, month_lbls, border="magenta"),
+    ]
 
-    # ── Projects table ───────────────────────────────────────────────────────
-    groups = group_by_project(month_r)
-    proj_table = Table(box=box.SIMPLE, border_style="dim", padding=(0, 1))
-    proj_table.add_column("Project", style="magenta")
-    proj_table.add_column("Tokens", style="cyan", justify="right")
-    proj_table.add_column("Cached", style="blue", justify="right")
-    proj_table.add_column("Cost", style="green", justify="right")
+    # ── Projects ─────────────────────────────────────────────────────────────
+    proj_panel = _project_bars(month_r)
 
-    rows = []
-    for proj, recs in groups.items():
-        tokens, cache = _sum_tokens(recs)
-        cost, has_unknown = _sum_cost(recs)
-        cost_str = "~$?.??" if has_unknown else format_cost(cost)
-        rows.append((proj, tokens, cache, cost_str))
-
-    for proj, tokens, cache, cost_str in sorted(rows, key=lambda x: -x[1])[:8]:
-        proj_table.add_row(proj, f"{tokens:,}", f"{cache:,}", cost_str)
-
-    proj_panel = Panel(
-        proj_table,
-        title="[bold]Projects (month-to-date)[/bold]",
-        border_style="dim",
-    )
-
-    # ── Budget / status bar ──────────────────────────────────────────────────
-    if config.monthly_token_budget is not None:
-        used, _ = _sum_tokens(month_r)
-        budget = config.monthly_token_budget
-        pct = min(used / budget, 1.0)
-        bar_width = 50
-        filled = int(bar_width * pct)
-
-        if pct < 0.70:
-            color, icon = "green", "●"
-        elif pct < 0.90:
-            color, icon = "yellow", "⚠"
-        else:
-            color, icon = "red", "🚨"
-
-        status = Text()
-        status.append(f" {icon} ", style=color)
-        status.append("▓" * filled, style=color)
-        status.append("░" * (bar_width - filled), style="dim")
-        status.append(f"  {pct*100:.1f}%  ", style=f"bold {color}")
-        status.append(f"{used:,} / {budget:,} tokens", style="dim")
-        status.append(f"  •  refreshed {now.strftime('%H:%M:%S')}", style="dim")
-        status_panel = Panel(status, border_style=color, padding=(0, 0))
-    else:
-        status = Text(justify="center")
-        status.append("No budget set  •  ", style="dim")
-        status.append("cctoken budget set <tokens>", style="bold dim")
-        status.append(f"  •  refreshed {now.strftime('%H:%M:%S')}", style="dim")
-        status_panel = Panel(status, border_style="dim", padding=(0, 0))
+    # ── Status bar ───────────────────────────────────────────────────────────
+    status = _status_bar(records, config, now)
+    status_panel = Panel(status, border_style="dim", padding=(0, 0))
 
     return RGroup(
         header_panel,
-        Columns(stat_panels, equal=True),
+        Columns(stat_panels, equal=True, expand=True),
         proj_panel,
         status_panel,
     )
@@ -297,18 +458,16 @@ def _build_watch_renderable(records: list[TokenRecord], config: Config, refresh_
 
 def show_watch(interval: int = 5) -> None:
     """Live-refresh dashboard. Ctrl+C to exit."""
-    from cctoken.parser import load_all_records
+    from cctoken.parser import load_all_records, filter_this_hour
     from cctoken.config import load_config
 
     with Live(console=console, refresh_per_second=1, screen=True) as live:
-        refresh_count = 0
         next_refresh = 0.0
         while True:
             now = time.monotonic()
             if now >= next_refresh:
                 records = load_all_records()
                 config = load_config()
-                live.update(_build_watch_renderable(records, config, refresh_count))
-                refresh_count += 1
+                live.update(_build_watch_renderable(records, config))
                 next_refresh = now + interval
             time.sleep(0.2)
