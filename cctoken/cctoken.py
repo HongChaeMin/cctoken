@@ -3,6 +3,13 @@
 
 import argparse
 import sys
+from pathlib import Path
+
+# Ensure the project root is on sys.path when run as a script/symlink
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from cctoken.parser import load_all_records
 from cctoken.config import load_config, save_budget
 from cctoken.display import show_summary, show_projects, show_trend, show_budget
