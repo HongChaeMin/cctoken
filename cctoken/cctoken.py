@@ -12,7 +12,7 @@ if str(_project_root) not in sys.path:
 
 from cctoken.parser import load_all_records
 from cctoken.config import load_config, save_budget
-from cctoken.display import show_summary, show_projects, show_trend, show_budget
+from cctoken.display import show_summary, show_projects, show_trend, show_budget, show_watch
 
 
 def cmd_summary(_args):
@@ -29,6 +29,13 @@ def cmd_projects(_args):
 def cmd_trend(_args):
     records = load_all_records()
     show_trend(records)
+
+
+def cmd_watch(_args):
+    try:
+        show_watch(interval=5)
+    except KeyboardInterrupt:
+        pass
 
 
 def cmd_budget(args):
@@ -55,6 +62,7 @@ def main():
 
     sub.add_parser("projects", help="Per-project breakdown (month-to-date)")
     sub.add_parser("trend", help="Hourly usage heatmap (last 7 days)")
+    sub.add_parser("watch", help="Live dashboard, refreshes every 5s (Ctrl+C to exit)")
 
     budget_p = sub.add_parser("budget", help="Manage monthly token budget")
     budget_sub = budget_p.add_subparsers(dest="budget_cmd")
@@ -70,6 +78,8 @@ def main():
         cmd_projects(args)
     elif args.cmd == "trend":
         cmd_trend(args)
+    elif args.cmd == "watch":
+        cmd_watch(args)
     elif args.cmd == "budget":
         if args.budget_cmd is None:
             budget_p.print_help()

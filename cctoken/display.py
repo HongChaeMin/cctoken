@@ -1,9 +1,14 @@
 from __future__ import annotations
+import time
+from datetime import datetime
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.columns import Columns
 from rich.text import Text
+from rich.layout import Layout
+from rich.live import Live
+from rich.align import Align
 from rich import box
 
 from cctoken.parser import (
@@ -185,3 +190,125 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
     console.print()
     console.print(_budget_panel(used, config.monthly_token_budget))
     console.print()
+
+
+def _build_watch_renderable(records: list[TokenRecord], config: Config, refresh_count: int):
+    """Build the full watch display as a single renderable."""
+    from rich.console import Group as RGroup
+
+    now = datetime.now().astimezone()
+
+    today_r = filter_today(records)
+    week_r = filter_this_week(records)
+    month_r = filter_this_month(records)
+
+    # ── Top header ──────────────────────────────────────────────────────────
+    header = Text(justify="center")
+    header.append(" ◆ ", style="bold magenta")
+    header.append("Claude Code Token Monitor", style="bold white")
+    header.append(" ◆ ", style="bold magenta")
+    header_panel = Panel(
+        Align.center(header),
+        border_style="bright_magenta",
+        padding=(0, 2),
+    )
+
+    # ── Stat columns ────────────────────────────────────────────────────────
+    stat_panels = []
+    for label, recs in [("Today", today_r), ("This Week", week_r), ("This Month", month_r)]:
+        tokens, cache = _sum_tokens(recs)
+        cost, has_unknown = _sum_cost(recs)
+        cost_str = "~$?.??" if has_unknown else format_cost(cost)
+
+        content = Text(justify="center")
+        content.append(f"{tokens:,}\n", style="bold cyan")
+        content.append("tokens\n", style="dim")
+        content.append(f"{cache:,}\n", style="blue")
+        content.append("cached\n", style="dim")
+        content.append(cost_str, style="bold green")
+        stat_panels.append(Panel(
+            Align.center(content),
+            title=f"[bold]{label}[/bold]",
+            border_style="cyan",
+            padding=(0, 1),
+        ))
+
+    # ── Projects table ───────────────────────────────────────────────────────
+    groups = group_by_project(month_r)
+    proj_table = Table(box=box.SIMPLE, border_style="dim", padding=(0, 1))
+    proj_table.add_column("Project", style="magenta")
+    proj_table.add_column("Tokens", style="cyan", justify="right")
+    proj_table.add_column("Cached", style="blue", justify="right")
+    proj_table.add_column("Cost", style="green", justify="right")
+
+    rows = []
+    for proj, recs in groups.items():
+        tokens, cache = _sum_tokens(recs)
+        cost, has_unknown = _sum_cost(recs)
+        cost_str = "~$?.??" if has_unknown else format_cost(cost)
+        rows.append((proj, tokens, cache, cost_str))
+
+    for proj, tokens, cache, cost_str in sorted(rows, key=lambda x: -x[1])[:8]:
+        proj_table.add_row(proj, f"{tokens:,}", f"{cache:,}", cost_str)
+
+    proj_panel = Panel(
+        proj_table,
+        title="[bold]Projects (month-to-date)[/bold]",
+        border_style="dim",
+    )
+
+    # ── Budget / status bar ──────────────────────────────────────────────────
+    if config.monthly_token_budget is not None:
+        used, _ = _sum_tokens(month_r)
+        budget = config.monthly_token_budget
+        pct = min(used / budget, 1.0)
+        bar_width = 50
+        filled = int(bar_width * pct)
+
+        if pct < 0.70:
+            color, icon = "green", "●"
+        elif pct < 0.90:
+            color, icon = "yellow", "⚠"
+        else:
+            color, icon = "red", "🚨"
+
+        status = Text()
+        status.append(f" {icon} ", style=color)
+        status.append("▓" * filled, style=color)
+        status.append("░" * (bar_width - filled), style="dim")
+        status.append(f"  {pct*100:.1f}%  ", style=f"bold {color}")
+        status.append(f"{used:,} / {budget:,} tokens", style="dim")
+        status.append(f"  •  refreshed {now.strftime('%H:%M:%S')}", style="dim")
+        status_panel = Panel(status, border_style=color, padding=(0, 0))
+    else:
+        status = Text(justify="center")
+        status.append("No budget set  •  ", style="dim")
+        status.append("cctoken budget set <tokens>", style="bold dim")
+        status.append(f"  •  refreshed {now.strftime('%H:%M:%S')}", style="dim")
+        status_panel = Panel(status, border_style="dim", padding=(0, 0))
+
+    return RGroup(
+        header_panel,
+        Columns(stat_panels, equal=True),
+        proj_panel,
+        status_panel,
+    )
+
+
+def show_watch(interval: int = 5) -> None:
+    """Live-refresh dashboard. Ctrl+C to exit."""
+    from cctoken.parser import load_all_records
+    from cctoken.config import load_config
+
+    with Live(console=console, refresh_per_second=1, screen=True) as live:
+        refresh_count = 0
+        next_refresh = 0.0
+        while True:
+            now = time.monotonic()
+            if now >= next_refresh:
+                records = load_all_records()
+                config = load_config()
+                live.update(_build_watch_renderable(records, config, refresh_count))
+                refresh_count += 1
+                next_refresh = now + interval
+            time.sleep(0.2)
