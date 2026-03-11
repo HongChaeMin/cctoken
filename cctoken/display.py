@@ -465,39 +465,15 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime) -
 
 # ── Status bar ────────────────────────────────────────────────────────────────
 
-def _status_bar(records: list[TokenRecord], config: Config, now: datetime) -> Text:
-    month_r = filter_this_month(records)
-    used, _ = _sum_tokens(month_r)
-    cost_total, _ = _sum_cost(month_r)
-
+def _status_bar(records: list[TokenRecord], now: datetime) -> Text:
     all_tokens, _ = _sum_tokens(records)
 
     bar = Text(no_wrap=True, overflow="ellipsis")
-
-    if config.monthly_token_budget is not None:
-        budget = config.monthly_token_budget
-        pct = min(used / budget, 1.0)
-        bw = 24
-        filled = int(bw * pct)
-        color = "green" if pct < 0.70 else ("yellow" if pct < 0.90 else "red")
-        bar.append(" ▐", style="dim")
-        bar.append("█" * filled, style=color)
-        bar.append("░" * (bw - filled), style="dim")
-        bar.append("▌ ", style="dim")
-        bar.append(f"{pct*100:.1f}%", style=f"bold {color}")
-        bar.append(f"  {used:,}/{budget:,} tok", style="dim")
-    else:
-        bar.append(f"  💰 {used:,} tok this month", style="cyan")
-
+    bar.append(f" ⟳ {now.strftime('%H:%M:%S')}", style="dim")
     bar.append("  ·  ", style="dim")
-    bar.append(format_cost(cost_total), style="green")
-    bar.append(" est.", style="dim")
+    bar.append(f"📚 {all_tokens:,} tok all-time", style="dim")
     bar.append("  ·  ", style="dim")
-    bar.append(f"📚 all-time {all_tokens:,} tok", style="dim")
-    bar.append("  ·  ", style="dim")
-    bar.append(f"⟳ {now.strftime('%H:%M:%S')}", style="dim")
-    bar.append("  ·  ", style="dim")
-    bar.append("Ctrl+C", style="dim")
+    bar.append("Ctrl+C to exit", style="dim")
     return bar
 
 
@@ -560,7 +536,7 @@ def _build_watch_renderable(
 
     # ── Status bar ────────────────────────────────────────────────────────────
     status_panel = Panel(
-        _status_bar(records, config, now),
+        _status_bar(records, now),
         border_style="dim",
         padding=(0, 0),
     )
