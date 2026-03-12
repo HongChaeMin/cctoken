@@ -196,45 +196,28 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
 _SPARKS = " ▁▂▃▄▅▆▇█"
 
 
-def _downsample(values: list[int], target: int) -> list[int]:
-    """Merge adjacent buckets so len(result) == target."""
+def _sparkline_fill(values: list[int], width: int, color_high: str = "magenta") -> Text:
+    """Render a sparkline filling exactly `width` chars.
+    Maps each character column to the proportionally correct bucket,
+    handling both upsampling (wide terminal) and downsampling (narrow)."""
+    if not values or width <= 0:
+        return Text(" " * max(width, 0), style="dim")
+    max_val = max(values) or 1
     n = len(values)
-    result = []
-    for i in range(target):
-        start = int(i * n / target)
-        end = max(start + 1, int((i + 1) * n / target))
-        result.append(sum(values[start:end]))
-    return result
-
-
-def _fit_spark(values: list[int], panel_inner: int) -> tuple[list[int], int]:
-    """Return (values, repeat) so that len(values) * repeat fits in panel_inner."""
-    if not values:
-        return values, 1
-    if len(values) <= panel_inner:
-        return values, max(1, panel_inner // len(values))
-    # Too many buckets — downsample to fit
-    return _downsample(values, panel_inner), 1
-
-
-def _sparkline(values: list[int], color_high: str = "magenta", repeat: int = 1, pad_to: int = 0) -> Text:
-    """Render a sparkline. Pads with spaces to pad_to width if specified."""
-    max_val = max(values) if values else 0
-    t = Text()
-    for v in values:
-        idx = int(v / max_val * 8) if max_val else 0
-        char = _SPARKS[idx] * repeat
+    t = Text(no_wrap=True)
+    for col in range(width):
+        bucket = int(col * n / width)
+        v = values[min(bucket, n - 1)]
+        idx = int(v / max_val * 8)
+        char = _SPARKS[idx]
         if idx == 0:
-            t.append(char or " " * repeat, style="dim")
+            t.append(char, style="dim")
         elif idx < 3:
             t.append(char, style="cyan")
         elif idx < 6:
             t.append(char, style="bright_cyan")
         else:
             t.append(char, style=f"bold {color_high}")
-    rendered = len(values) * repeat
-    if pad_to > rendered:
-        t.append(" " * (pad_to - rendered), style="dim")
     return t
 
 
@@ -275,8 +258,8 @@ def _today_axis(width: int) -> str:
     return "".join(axis)
 
 
-def _week_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
-    """7 daily buckets Mon–Sun. Returns (values, axis_str)."""
+def _week_buckets(records: list[TokenRecord]) -> list[int]:
+    """7 daily buckets Mon–Sun."""
     from datetime import timedelta
     now = datetime.now().astimezone()
     week_start = (now - timedelta(days=now.weekday())).date()
@@ -286,13 +269,11 @@ def _week_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
         d = r.timestamp.astimezone().date()
         if d in daily:
             daily[d] += r.display_tokens
-    # 1 char per day: M T W T F S S
-    axis = "M T W T F S S"
-    return [daily[d] for d in days], axis
+    return [daily[d] for d in days]
 
 
-def _month_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
-    """Weekly buckets for this month. Returns (values, axis_str)."""
+def _month_buckets(records: list[TokenRecord]) -> list[int]:
+    """5 weekly buckets for this month."""
     now = datetime.now().astimezone()
     month_start = now.replace(day=1).date()
     buckets = [0] * 5
@@ -300,7 +281,19 @@ def _month_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
         d = r.timestamp.astimezone().date()
         if d >= month_start and d.month == now.month:
             buckets[min((d.day - 1) // 7, 4)] += r.display_tokens
-    return buckets, "W1W2W3W4W5"
+    return buckets
+
+
+def _axis(labels: list[str], width: int) -> str:
+    """Place labels proportionally across `width` chars."""
+    axis = [" "] * width
+    n = len(labels)
+    for i, label in enumerate(labels):
+        pos = round(i * (width - 1) / max(n - 1, 1))
+        for j, ch in enumerate(label):
+            if pos + j < width:
+                axis[pos + j] = ch
+    return "".join(axis)
 
 
 # ── Card builders ─────────────────────────────────────────────────────────────
@@ -522,36 +515,37 @@ def _build_watch_renderable(
     header_panel = Panel(Align.center(header), border_style="bright_magenta", padding=(0, 0))
 
     # ── Stat cards ────────────────────────────────────────────────────────────
-    hour_vals, hour_range  = _hour_buckets(records)
-    today_vals, today_axis = _today_buckets(records)
-    week_vals, week_lbls   = _week_buckets(records)
-    month_vals, month_lbls = _month_buckets(records)
+    hour_vals, hour_range = _hour_buckets(records)
+    today_vals, _         = _today_buckets(records)
+    week_vals             = _week_buckets(records)
+    month_vals            = _month_buckets(records)
 
-    # Min panel_inner so cards don't get uselessly tiny
-    MIN_PANEL_INNER = 20
-    panel_inner = max(MIN_PANEL_INNER, (term_width - 16) // 4)
+    # Exact panel inner width: each of 4 columns gets term_width//4,
+    # minus 2 panel borders and 2 panel padding chars.
+    panel_inner = max(8, term_width // 4 - 4)
 
     def make_card(title, emoji, recs, raw_vals, axis=None, subtitle=None, border="cyan"):
         tokens, _ = _sum_tokens(recs)
-        cost, unk  = _sum_cost(recs)
-        vals, repeat = _fit_spark(raw_vals, panel_inner)
-        spark_text = _sparkline(vals, repeat=repeat, pad_to=panel_inner)
-        return _stat_card(title, emoji, tokens, cost, unk, spark_text, axis, subtitle, border)
-
-    # Today axis: always show, proportionally fit to rendered width
-    today_fitted, today_repeat = _fit_spark(today_vals, panel_inner)
-    today_rendered_width = len(today_fitted) * today_repeat
-    today_axis_str = _today_axis(today_rendered_width)
+        cost, unk = _sum_cost(recs)
+        return _stat_card(
+            title, emoji, tokens, cost, unk,
+            _sparkline_fill(raw_vals, panel_inner),
+            axis, subtitle, border,
+        )
 
     stat_panels = [
         make_card("Hour",       "⚡", hour_r,  hour_vals,
-                  subtitle=hour_range,  border="bright_cyan"),
+                  subtitle=hour_range,
+                  border="bright_cyan"),
         make_card("Today",      "☀️ ", today_r, today_vals,
-                  axis=today_axis_str,  border="cyan"),
+                  axis=_today_axis(panel_inner),
+                  border="cyan"),
         make_card("This Week",  "📅", week_r,  week_vals,
-                  axis=week_lbls,       border="blue"),
+                  axis=_axis(["M","T","W","T","F","S","S"], panel_inner),
+                  border="blue"),
         make_card("This Month", "📆", month_r, month_vals,
-                  axis=month_lbls,      border="magenta"),
+                  axis=_axis(["W1","W2","W3","W4","W5"], panel_inner),
+                  border="magenta"),
     ]
 
     # ── Projects (adaptive rows based on terminal height) ─────────────────────
