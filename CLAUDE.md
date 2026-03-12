@@ -22,7 +22,7 @@ python3 -m pytest cctoken/tests/test_parser.py -v              # Single file
 python3 -m pytest cctoken/tests/test_parser.py::test_parse_record_basic -v  # Single test
 
 # Install
-pip install -r requirements.txt && bash install.sh
+pip install -e .
 ```
 
 ## Architecture

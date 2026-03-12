@@ -8,18 +8,25 @@ Claude Code 토큰 사용량 모니터링 CLI 도구.
 
 ## Installation / 설치
 
+### Homebrew (recommended)
+
+```bash
+brew tap HongChaeMin/cctoken
+brew install cctoken
+```
+
+### pip
+
+```bash
+pip install git+https://github.com/HongChaeMin/cctoken.git
+```
+
+### From source
+
 ```bash
 git clone git@github.com:HongChaeMin/cctoken.git
 cd cctoken
-pip install -r requirements.txt
-bash install.sh
-```
-
-If `~/.local/bin` is not in your PATH, add it to `~/.zshrc`:
-`~/.local/bin`이 PATH에 없다면 `~/.zshrc`에 추가:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
+pip install -e .
 ```
 
 ## Usage / 사용법
