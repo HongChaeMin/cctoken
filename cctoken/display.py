@@ -196,6 +196,27 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
 _SPARKS = " ▁▂▃▄▅▆▇█"
 
 
+def _downsample(values: list[int], target: int) -> list[int]:
+    """Merge adjacent buckets so len(result) == target."""
+    n = len(values)
+    result = []
+    for i in range(target):
+        start = int(i * n / target)
+        end = max(start + 1, int((i + 1) * n / target))
+        result.append(sum(values[start:end]))
+    return result
+
+
+def _fit_spark(values: list[int], panel_inner: int) -> tuple[list[int], int]:
+    """Return (values, repeat) so that len(values) * repeat fits in panel_inner."""
+    if not values:
+        return values, 1
+    if len(values) <= panel_inner:
+        return values, max(1, panel_inner // len(values))
+    # Too many buckets — downsample to fit
+    return _downsample(values, panel_inner), 1
+
+
 def _sparkline(values: list[int], color_high: str = "magenta", repeat: int = 1) -> Text:
     """Render a sparkline. Width = len(values) * repeat."""
     max_val = max(values) if values else 0
@@ -504,24 +525,26 @@ def _build_watch_renderable(
     week_vals, week_lbls   = _week_buckets(records)
     month_vals, month_lbls = _month_buckets(records)
 
-    # Dynamic repeat: fill ~panel inner width for each sparkline
     # panel_inner ≈ (term_width - 4 panels × 3 borders) // 4 - 2 padding
     panel_inner = max(10, (term_width - 16) // 4)
 
-    def repeat_for(buckets: list[int]) -> int:
-        return max(1, panel_inner // len(buckets))
-
-    def make_card(title, emoji, recs, spark, axis=None, subtitle=None, border="cyan"):
+    def make_card(title, emoji, recs, raw_vals, axis=None, subtitle=None, border="cyan"):
         tokens, _ = _sum_tokens(recs)
         cost, unk  = _sum_cost(recs)
-        spark_text = _sparkline(spark, repeat=repeat_for(spark))
+        vals, repeat = _fit_spark(raw_vals, panel_inner)
+        spark_text = _sparkline(vals, repeat=repeat)
         return _stat_card(title, emoji, tokens, cost, unk, spark_text, axis, subtitle, border)
+
+    # Today axis must match actual rendered width after fit
+    today_fitted, today_repeat = _fit_spark(today_vals, panel_inner)
+    # Only show hour axis when not heavily downsampled (original 24 buckets intact)
+    today_axis_str = _today_axis(today_repeat) if len(today_fitted) == 24 else None
 
     stat_panels = [
         make_card("Hour",       "⚡", hour_r,  hour_vals,
                   subtitle=hour_range,  border="bright_cyan"),
         make_card("Today",      "☀️ ", today_r, today_vals,
-                  axis=_today_axis(repeat_for(today_vals)), border="cyan"),
+                  axis=today_axis_str,  border="cyan"),
         make_card("This Week",  "📅", week_r,  week_vals,
                   axis=week_lbls,       border="blue"),
         make_card("This Month", "📆", month_r, month_vals,
