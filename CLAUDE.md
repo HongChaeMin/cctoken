@@ -46,4 +46,4 @@ pip install -e .
 
 ## Dependencies
 
-Python 3.10+, `rich>=13.0.0` (only external dependency).
+Python 3.9+, `rich>=13.0.0` (only external dependency).
