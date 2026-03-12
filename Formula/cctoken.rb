@@ -4,7 +4,7 @@ class Cctoken < Formula
   desc "Claude Code token usage monitoring CLI"
   homepage "https://github.com/HongChaeMin/cctoken"
   url "https://github.com/HongChaeMin/cctoken/archive/refs/tags/v1.0.0.tar.gz"
-  sha256 ""
+  sha256 "327a37a3ba0730595a3ec1f8b2585df0d211a764fd94b1db3127dc5e06a37412"
   license "MIT"
 
   depends_on "python@3"
