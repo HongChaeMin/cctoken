@@ -217,8 +217,8 @@ def _fit_spark(values: list[int], panel_inner: int) -> tuple[list[int], int]:
     return _downsample(values, panel_inner), 1
 
 
-def _sparkline(values: list[int], color_high: str = "magenta", repeat: int = 1) -> Text:
-    """Render a sparkline. Width = len(values) * repeat."""
+def _sparkline(values: list[int], color_high: str = "magenta", repeat: int = 1, pad_to: int = 0) -> Text:
+    """Render a sparkline. Pads with spaces to pad_to width if specified."""
     max_val = max(values) if values else 0
     t = Text()
     for v in values:
@@ -232,6 +232,9 @@ def _sparkline(values: list[int], color_high: str = "magenta", repeat: int = 1) 
             t.append(char, style="bright_cyan")
         else:
             t.append(char, style=f"bold {color_high}")
+    rendered = len(values) * repeat
+    if pad_to > rendered:
+        t.append(" " * (pad_to - rendered), style="dim")
     return t
 
 
@@ -261,15 +264,14 @@ def _today_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
     return hourly, ""
 
 
-def _today_axis(repeat: int) -> str:
-    """Build Today hour axis with the given char repeat per bucket."""
-    width = 24 * repeat
+def _today_axis(width: int) -> str:
+    """Build Today hour axis fitting exactly `width` chars."""
     axis = [" "] * width
     for h, label in [(0, "0"), (6, "6"), (12, "12"), (18, "18"), (23, "23")]:
-        idx = h * repeat
+        pos = round(h / 23 * (width - 1))
         for j, ch in enumerate(label):
-            if idx + j < width:
-                axis[idx + j] = ch
+            if pos + j < width:
+                axis[pos + j] = ch
     return "".join(axis)
 
 
@@ -525,20 +527,21 @@ def _build_watch_renderable(
     week_vals, week_lbls   = _week_buckets(records)
     month_vals, month_lbls = _month_buckets(records)
 
-    # panel_inner ≈ (term_width - 4 panels × 3 borders) // 4 - 2 padding
-    panel_inner = max(10, (term_width - 16) // 4)
+    # Min panel_inner so cards don't get uselessly tiny
+    MIN_PANEL_INNER = 20
+    panel_inner = max(MIN_PANEL_INNER, (term_width - 16) // 4)
 
     def make_card(title, emoji, recs, raw_vals, axis=None, subtitle=None, border="cyan"):
         tokens, _ = _sum_tokens(recs)
         cost, unk  = _sum_cost(recs)
         vals, repeat = _fit_spark(raw_vals, panel_inner)
-        spark_text = _sparkline(vals, repeat=repeat)
+        spark_text = _sparkline(vals, repeat=repeat, pad_to=panel_inner)
         return _stat_card(title, emoji, tokens, cost, unk, spark_text, axis, subtitle, border)
 
-    # Today axis must match actual rendered width after fit
+    # Today axis: always show, proportionally fit to rendered width
     today_fitted, today_repeat = _fit_spark(today_vals, panel_inner)
-    # Only show hour axis when not heavily downsampled (original 24 buckets intact)
-    today_axis_str = _today_axis(today_repeat) if len(today_fitted) == 24 else None
+    today_rendered_width = len(today_fitted) * today_repeat
+    today_axis_str = _today_axis(today_rendered_width)
 
     stat_panels = [
         make_card("Hour",       "⚡", hour_r,  hour_vals,
