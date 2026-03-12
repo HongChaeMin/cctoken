@@ -196,10 +196,8 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
 _SPARKS = " ▁▂▃▄▅▆▇█"
 
 
-def _sparkline_fill(values: list[int], width: int, color_high: str = "magenta") -> Text:
-    """Render a sparkline filling exactly `width` chars.
-    Maps each character column to the proportionally correct bucket,
-    handling both upsampling (wide terminal) and downsampling (narrow)."""
+def _render_spark(values: list[int], width: int, color_high: str = "magenta") -> Text:
+    """Render sparkline as Text filling exactly `width` chars."""
     if not values or width <= 0:
         return Text(" " * max(width, 0), style="dim")
     max_val = max(values) or 1
@@ -219,6 +217,38 @@ def _sparkline_fill(values: list[int], width: int, color_high: str = "magenta") 
         else:
             t.append(char, style=f"bold {color_high}")
     return t
+
+
+class _Sparkline:
+    """Renderable sparkline that fills the full available console width at render time."""
+
+    def __init__(self, values: list[int], min_width: int = 16, color_high: str = "magenta"):
+        self.values = values
+        self.min_width = min_width
+        self.color_high = color_high
+
+    def __rich_console__(self, console, options):
+        width = max(self.min_width, options.max_width)
+        yield _render_spark(self.values, width, self.color_high)
+
+
+class _Axis:
+    """Renderable axis labels that fill the full available console width at render time."""
+
+    def __init__(self, labels: list[str], min_width: int = 16):
+        self.labels = labels
+        self.min_width = min_width
+
+    def __rich_console__(self, console, options):
+        width = max(self.min_width, options.max_width)
+        a = [" "] * width
+        n = len(self.labels)
+        for i, label in enumerate(self.labels):
+            pos = round(i * (width - 1) / max(n - 1, 1))
+            for j, ch in enumerate(label):
+                if pos + j < width:
+                    a[pos + j] = ch
+        yield Text("".join(a), style="dim", no_wrap=True)
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -247,16 +277,6 @@ def _today_buckets(records: list[TokenRecord]) -> tuple[list[int], str]:
     return hourly, ""
 
 
-def _today_axis(width: int) -> str:
-    """Build Today hour axis fitting exactly `width` chars."""
-    axis = [" "] * width
-    for h, label in [(0, "0"), (6, "6"), (12, "12"), (18, "18"), (23, "23")]:
-        pos = round(h / 23 * (width - 1))
-        for j, ch in enumerate(label):
-            if pos + j < width:
-                axis[pos + j] = ch
-    return "".join(axis)
-
 
 def _week_buckets(records: list[TokenRecord]) -> list[int]:
     """7 daily buckets Mon–Sun."""
@@ -284,25 +304,14 @@ def _month_buckets(records: list[TokenRecord]) -> list[int]:
     return buckets
 
 
-def _axis(labels: list[str], width: int) -> str:
-    """Place labels proportionally across `width` chars."""
-    axis = [" "] * width
-    n = len(labels)
-    for i, label in enumerate(labels):
-        pos = round(i * (width - 1) / max(n - 1, 1))
-        for j, ch in enumerate(label):
-            if pos + j < width:
-                axis[pos + j] = ch
-    return "".join(axis)
-
 
 # ── Card builders ─────────────────────────────────────────────────────────────
 
 def _stat_card(
     title: str, emoji: str,
     tokens: int, cost: float, has_unknown: bool,
-    spark: Text,
-    axis: str | None = None,
+    spark: _Sparkline,
+    axis: _Axis | None = None,
     subtitle: str | None = None,
     border: str = "cyan",
 ) -> Panel:
@@ -310,32 +319,25 @@ def _stat_card(
 
     cost_str = "~$?.??" if has_unknown else format_cost(cost)
 
-    # Token count line
     tok_line = Text(justify="center")
     tok_line.append(f"{emoji} ", style="bold")
     tok_line.append(f"{tokens:,}", style="bold cyan")
     tok_line.append(" tok", style="dim")
 
-    # Optional subtitle (e.g. time range for Hour)
     parts: list = [tok_line]
     if subtitle:
-        sub = Text(subtitle, justify="center", style="dim")
-        parts.append(sub)
+        parts.append(Text(subtitle, justify="center", style="dim"))
 
-    # Sparkline (pre-rendered Text)
-    parts.append(Align.center(spark))
-
-    # Axis string below sparkline
+    parts.append(spark)
     if axis:
-        parts.append(Align.center(Text(axis, style="dim")))
+        parts.append(axis)
 
-    # Cost
     cost_line = Text(justify="center")
     cost_line.append(cost_str, style="bold green")
     parts.append(cost_line)
 
     return Panel(
-        Align.center(RGroup(*parts)),
+        RGroup(*parts),
         title=f"[bold]{title}[/bold]",
         border_style=border,
         padding=(0, 1),
@@ -520,16 +522,16 @@ def _build_watch_renderable(
     week_vals             = _week_buckets(records)
     month_vals            = _month_buckets(records)
 
-    # Exact panel inner width: each of 4 columns gets term_width//4,
-    # minus 2 panel borders and 2 panel padding chars.
-    panel_inner = max(8, term_width // 4 - 4)
+    # Min inner width: wide enough for axis labels to be readable.
+    # _Sparkline / _Axis use __rich_console__ to fill the actual panel width at render time.
+    CARD_MIN_INNER = 16
 
     def make_card(title, emoji, recs, raw_vals, axis=None, subtitle=None, border="cyan"):
         tokens, _ = _sum_tokens(recs)
         cost, unk = _sum_cost(recs)
         return _stat_card(
             title, emoji, tokens, cost, unk,
-            _sparkline_fill(raw_vals, panel_inner),
+            _Sparkline(raw_vals, min_width=CARD_MIN_INNER),
             axis, subtitle, border,
         )
 
@@ -538,13 +540,13 @@ def _build_watch_renderable(
                   subtitle=hour_range,
                   border="bright_cyan"),
         make_card("Today",      "☀️ ", today_r, today_vals,
-                  axis=_today_axis(panel_inner),
+                  axis=_Axis(["0","6","12","18","23"], min_width=CARD_MIN_INNER),
                   border="cyan"),
         make_card("This Week",  "📅", week_r,  week_vals,
-                  axis=_axis(["M","T","W","T","F","S","S"], panel_inner),
+                  axis=_Axis(["M","T","W","T","F","S","S"], min_width=CARD_MIN_INNER),
                   border="blue"),
         make_card("This Month", "📆", month_r, month_vals,
-                  axis=_axis(["W1","W2","W3","W4","W5"], panel_inner),
+                  axis=_Axis(["W1","W2","W3","W4","W5"], min_width=CARD_MIN_INNER),
                   border="magenta"),
     ]
 
