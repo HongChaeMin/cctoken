@@ -30,10 +30,8 @@ cctoken hour                # Current 5h block detail view | 현재 5시간 블�
 cctoken today               # Today detail view | 오늘 상세
 cctoken week                # This week detail view | 이번 주 상세
 cctoken month               # This month detail view | 이번 달 상세
-cctoken projects            # Per-project breakdown (month-to-date) | 프로젝트별 (월간)
 cctoken trend               # Hourly usage heatmap (last 7 days) | 시간대별 히트맵 (7일)
 cctoken budget set 5000000  # Set monthly token budget | 월간 토큰 예산 설정
-cctoken budget show         # Show budget usage | 예산 사용 현황
 cctoken budget reset-day 1  # Set billing reset day | 과금 리셋일 설정
 ```
 

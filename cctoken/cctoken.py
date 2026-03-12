@@ -12,7 +12,7 @@ if str(_project_root) not in sys.path:
 
 from cctoken.parser import load_all_records
 from cctoken.config import load_config, save_budget, save_reset_day
-from cctoken.display import show_summary, show_projects, show_trend, show_budget, show_watch, show_detail_watch
+from cctoken.display import show_summary, show_trend, show_watch, show_detail_watch
 
 
 def cmd_summary(_args):
@@ -20,10 +20,6 @@ def cmd_summary(_args):
     config = load_config()
     show_summary(records, config)
 
-
-def cmd_projects(_args):
-    records = load_all_records()
-    show_projects(records)
 
 
 def cmd_trend(_args):
@@ -54,10 +50,6 @@ def cmd_budget(args):
             sys.exit(1)
         save_budget(tokens)
         print(f"Budget set to {tokens:,} tokens/month")
-    elif args.budget_cmd == "show":
-        records = load_all_records()
-        config = load_config()
-        show_budget(records, config)
     elif args.budget_cmd == "reset-day":
         try:
             day = int(args.day)
@@ -81,7 +73,6 @@ def main():
     sub.add_parser("today", help="Live view: today's usage")
     sub.add_parser("week", help="Live view: this week's usage")
     sub.add_parser("month", help="Live view: this month's usage")
-    sub.add_parser("projects", help="Per-project breakdown (month-to-date)")
     sub.add_parser("trend", help="Hourly usage heatmap (last 7 days)")
     sub.add_parser("watch", help="Live dashboard, refreshes every 5s (Ctrl+C to exit)")
 
@@ -89,7 +80,6 @@ def main():
     budget_sub = budget_p.add_subparsers(dest="budget_cmd")
     set_p = budget_sub.add_parser("set", help="Set monthly token budget")
     set_p.add_argument("tokens", help="Token budget (e.g. 5000000)")
-    budget_sub.add_parser("show", help="Show budget and current usage")
     reset_p = budget_sub.add_parser("reset-day", help="Set the day of month when tokens reset (1–28)")
     reset_p.add_argument("day", help="Day of month (e.g. 1 for 1st, 15 for 15th)")
 
@@ -99,8 +89,6 @@ def main():
         cmd_watch(args)
     elif args.cmd in ("hour", "today", "week", "month"):
         cmd_detail(args)
-    elif args.cmd == "projects":
-        cmd_projects(args)
     elif args.cmd == "trend":
         cmd_trend(args)
     elif args.cmd == "watch":
