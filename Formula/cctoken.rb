@@ -7,7 +7,7 @@ class Cctoken < Formula
   sha256 "327a37a3ba0730595a3ec1f8b2585df0d211a764fd94b1db3127dc5e06a37412"
   license "MIT"
 
-  depends_on "python@3"
+  depends_on "python@3.13"
 
   resource "rich" do
     url "https://files.pythonhosted.org/packages/a1/53/830aa4c3066a8ab0ae9a9955976fb770fe9c6102117c8ec4ab3ea62d89e8/rich-14.0.0.tar.gz"
@@ -30,7 +30,7 @@ class Cctoken < Formula
   end
 
   def install
-    virtualenv_install_with_resources
+    virtualenv_install_with_resources using: "python@3.13"
   end
 
   test do
