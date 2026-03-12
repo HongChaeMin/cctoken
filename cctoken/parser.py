@@ -88,6 +88,26 @@ def _to_local(dt: datetime) -> datetime:
     return dt.astimezone()
 
 
+def current_5h_block(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Return (block_start, block_end) for the current fixed 5-hour block.
+    Blocks: 00-05, 05-10, 10-15, 15-20, 20-01(next day)."""
+    if now is None:
+        now = datetime.now().astimezone()
+    block_idx = now.hour // 5  # 0,1,2,3,4
+    start_hour = block_idx * 5
+    block_start = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    block_end = block_start + timedelta(hours=5)
+    return block_start, block_end
+
+
+def filter_current_5h_block(records: list[TokenRecord], now: datetime | None = None) -> list[TokenRecord]:
+    """Filter records in the current fixed 5-hour block."""
+    if now is None:
+        now = datetime.now().astimezone()
+    block_start, _ = current_5h_block(now)
+    return [r for r in records if _to_local(r.timestamp) >= block_start and _to_local(r.timestamp) < now + timedelta(seconds=1)]
+
+
 def filter_this_hour(records: list[TokenRecord]) -> list[TokenRecord]:
     now = datetime.now().astimezone()
     return [
