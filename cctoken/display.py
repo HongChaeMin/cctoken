@@ -511,17 +511,57 @@ def _render_spark(values: list[int], width: int, color_high: str = "magenta") ->
     return t
 
 
+def _render_spark_rows(values: list[int], width: int, height: int, color_high: str = "magenta") -> list[Text]:
+    """Render a multi-row sparkline. Returns `height` Text objects (top to bottom)."""
+    if not values or width <= 0:
+        return [Text(" " * max(width, 0), style="dim") for _ in range(height)]
+    max_val = max(values) or 1
+    n = len(values)
+    total_levels = height * 8
+    rows = []
+    for row in range(height):
+        row_floor = (height - 1 - row) * 8
+        t = Text(no_wrap=True)
+        for col in range(width):
+            bucket = int(col * n / width)
+            v = values[min(bucket, n - 1)]
+            level = round(v / max_val * total_levels)
+            row_level = min(level - row_floor, 8)
+            if row_level >= 8:
+                char = "█"
+            elif row_level > 0:
+                char = _SPARKS[row_level]
+            else:
+                char = " "
+            frac = v / max_val
+            if char == " ":
+                t.append(char, style="dim")
+            elif frac < 0.375:
+                t.append(char, style="cyan")
+            elif frac < 0.75:
+                t.append(char, style="bright_cyan")
+            else:
+                t.append(char, style=f"bold {color_high}")
+        rows.append(t)
+    return rows
+
+
 class _Sparkline:
     """Renderable sparkline that fills the full available console width at render time."""
 
-    def __init__(self, values: list[int], min_width: int = 16, color_high: str = "magenta"):
+    def __init__(self, values: list[int], min_width: int = 16, color_high: str = "magenta", height: int = 1):
         self.values = values
         self.min_width = min_width
         self.color_high = color_high
+        self.height = height
 
     def __rich_console__(self, console, options):
         width = max(self.min_width, options.max_width)
-        yield _render_spark(self.values, width, self.color_high)
+        if self.height == 1:
+            yield _render_spark(self.values, width, self.color_high)
+        else:
+            for row in _render_spark_rows(self.values, width, self.height, self.color_high):
+                yield row
 
 
 class _Axis:
@@ -768,7 +808,7 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime, p
         for r in filtered_h:
             h = r.timestamp.astimezone().hour - start_hour
             buckets[max(0, min(h, 4))] += r.display_tokens
-        lines.append(_Sparkline(buckets, min_width=16, color_high="yellow"))
+        lines.append(_Sparkline(buckets, min_width=16, color_high="yellow", height=3))
         labels = [f"{(start_hour + i) % 24:02d}" for i in range(5)]
         lines.append(_Axis(labels, min_width=16))
         burn_per_hour = rate
@@ -785,7 +825,7 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime, p
         rate_line.append("  (today avg)", style="dim")
         lines.append(rate_line)
         today_vals, _ = _today_buckets(records)
-        lines.append(_Sparkline(today_vals, min_width=24, color_high="yellow"))
+        lines.append(_Sparkline(today_vals, min_width=24, color_high="yellow", height=3))
         lines.append(_Axis(["0", "6", "12", "18", "23"], min_width=24))
         burn_per_hour = rate
 
@@ -801,7 +841,7 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime, p
         rate_line.append("  (this week avg)", style="dim")
         lines.append(rate_line)
         week_vals = _week_buckets(records)
-        lines.append(_Sparkline(week_vals, min_width=16, color_high="yellow"))
+        lines.append(_Sparkline(week_vals, min_width=16, color_high="yellow", height=3))
         lines.append(_Axis(["M", "T", "W", "T", "F", "S", "S"], min_width=16))
         burn_per_hour = rate / 24
 
@@ -821,7 +861,7 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime, p
         daily = [0] * days_in_month
         for r in month_r:
             daily[r.timestamp.astimezone().day - 1] += r.display_tokens
-        lines.append(_Sparkline(daily, min_width=16, color_high="yellow"))
+        lines.append(_Sparkline(daily, min_width=16, color_high="yellow", height=3))
         lines.append(_Axis(["1", str(days_in_month // 2), str(days_in_month)], min_width=16))
         burn_per_hour = rate / 24
 
@@ -838,7 +878,7 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime, p
         rate_line.append("  (last 24h avg)", style="dim")
         lines.append(rate_line)
         burn_buckets = _burn_hourly_buckets(records, now)
-        lines.append(_Sparkline(burn_buckets, min_width=24, color_high="yellow"))
+        lines.append(_Sparkline(burn_buckets, min_width=24, color_high="yellow", height=3))
         h_now = now.hour
         axis_labels = [f"{(h_now - 23 + i) % 24:02d}" for i in [0, 6, 12, 18, 23]]
         lines.append(_Axis(axis_labels, min_width=24))
