@@ -13,7 +13,8 @@ from rich import box
 
 from cctoken.parser import (
     TokenRecord, filter_this_hour, filter_today, filter_this_week,
-    filter_this_month, filter_last_7_days, group_by_project
+    filter_this_month, filter_last_7_days, filter_current_5h_block,
+    current_5h_block, group_by_project,
 )
 from cctoken.pricing import calculate_cost, format_cost, UNKNOWN_COST
 from cctoken.config import Config
@@ -190,6 +191,297 @@ def show_budget(records: list[TokenRecord], config: Config) -> None:
     console.print()
     console.print(_budget_panel(used, config.monthly_token_budget))
     console.print()
+
+
+# ── Detail view (hour / today / month) ────────────────────────────────────────
+
+def _group_by_model(records: list[TokenRecord]) -> dict[str, int]:
+    models: dict[str, int] = {}
+    for r in records:
+        models[r.model] = models.get(r.model, 0) + r.display_tokens
+    return models
+
+
+def _period_budget(monthly_budget: int | None, period: str, now: datetime) -> tuple[int | None, str]:
+    """Calculate the budget allocation for a given period.
+    Returns (budget_tokens, label)."""
+    import calendar
+    if monthly_budget is None:
+        return None, ""
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    if period == "hour":
+        blocks = days_in_month * 24 / 5
+        return int(monthly_budget / blocks), "5h Budget"
+    elif period == "today":
+        return int(monthly_budget / days_in_month), "Daily Budget"
+    elif period == "week":
+        return int(monthly_budget * 7 / days_in_month), "Weekly Budget"
+    else:
+        return monthly_budget, "Monthly Budget"
+
+
+class _FullWidthBudgetBar:
+    """Full-width budget bar with cost/cache info, rendered at actual panel width."""
+
+    def __init__(self, used: int, budget: int, cost_str: str, cache: int):
+        self.used = used
+        self.budget = budget
+        self.cost_str = cost_str
+        self.cache = cache
+
+    def __rich_console__(self, console, options):
+        width = options.max_width
+        pct = self.used / self.budget if self.budget > 0 else 0
+        if pct < 0.70:
+            color = "green"
+        elif pct < 0.90:
+            color = "yellow"
+        else:
+            color = "red"
+
+        filled = int(width * min(pct, 1.0))
+        remaining = width - filled
+        bar = Text(no_wrap=True)
+        bar.append("█" * filled, style=color)
+        bar.append("░" * remaining, style="dim")
+        yield bar
+
+        info = Text()
+        info.append(f"{self.used:,}", style="bold cyan")
+        info.append(f" / {self.budget:,}", style="dim")
+        info.append(f"  {pct*100:.1f}%", style=f"bold {color}")
+        info.append("  ·  ", style="dim")
+        info.append(f"{self.cache:,}", style="bold blue")
+        info.append(" cached", style="dim")
+        info.append("  ·  ", style="dim")
+        info.append(self.cost_str, style="bold green")
+        yield info
+
+
+def _detail_budget_bar(used: int, budget: int | None, label: str, cost_str: str, cache: int) -> Panel:
+    if budget is None:
+        content = Text()
+        content.append("  No budget configured. Run: ", style="dim")
+        content.append("cctoken budget set <tokens>", style="bold")
+        return Panel(content, title="[bold]Budget[/bold]", border_style="dim")
+
+    pct = used / budget if budget > 0 else 0
+    if pct < 0.70:
+        color = "green"
+    elif pct < 0.90:
+        color = "yellow"
+    else:
+        color = "red"
+
+    return Panel(
+        _FullWidthBudgetBar(used, budget, cost_str, cache),
+        title=f"[bold]{label}[/bold]",
+        border_style=color,
+        padding=(0, 1),
+    )
+
+
+def _detail_reset_line(config: Config, now) -> Text:
+    line = Text()
+    if config.billing_reset_day is not None:
+        reset_dt = _next_reset(config.billing_reset_day, now)
+        secs_left = (reset_dt - now).total_seconds()
+        line.append("  🔄 Resets in ", style="dim")
+        line.append(_fmt_duration(secs_left), style="bold green")
+        line.append(f"  ({reset_dt.strftime('%b %d')})", style="dim")
+    else:
+        line.append("  💡 run: ", style="dim")
+        line.append("cctoken budget reset-day <day>", style="bold")
+        line.append(" to show reset countdown", style="dim")
+    return line
+
+
+_MODEL_COLORS = {
+    "claude-opus-4-6": "bright_magenta",
+    "claude-sonnet-4-6": "bright_cyan",
+    "claude-haiku-4-5-20251001": "bright_green",
+}
+_MODEL_FALLBACK_COLORS = ["yellow", "blue", "white", "red"]
+
+
+class _FullWidthModelBar:
+    """Full-width stacked model bar, rendered at actual panel width."""
+
+    def __init__(self, model_colors: list[tuple[str, str, int]], total: int):
+        self.model_colors = model_colors
+        self.total = total
+
+    def __rich_console__(self, console, options):
+        width = options.max_width
+        bar = Text(no_wrap=True)
+        remaining = width
+        for i, (short, color, tokens) in enumerate(self.model_colors):
+            if i < len(self.model_colors) - 1:
+                seg = max(int(tokens / self.total * width), 1) if tokens > 0 else 0
+            else:
+                seg = remaining
+            remaining -= seg
+            bar.append("█" * seg, style=color)
+        yield bar
+
+        for short, color, tokens in self.model_colors:
+            pct = tokens / self.total * 100
+            line = Text()
+            line.append(f"● {short:<20}", style=f"bold {color}")
+            line.append(f"{tokens:>10,}", style="bold cyan")
+            line.append(f"  {pct:5.1f}%", style="dim")
+            yield line
+
+
+def _detail_model_panel(records: list[TokenRecord]) -> Panel:
+    models = _group_by_model(records)
+    if not models:
+        return Panel(
+            Text("  No usage data", style="dim italic"),
+            title="[bold]Model Usage[/bold]",
+            border_style="dim",
+        )
+
+    total = sum(models.values()) or 1
+    sorted_models = sorted(models.items(), key=lambda x: -x[1])
+
+    fallback_idx = 0
+    model_colors: list[tuple[str, str, int]] = []
+    for model, tokens in sorted_models:
+        color = _MODEL_COLORS.get(model)
+        if color is None:
+            color = _MODEL_FALLBACK_COLORS[fallback_idx % len(_MODEL_FALLBACK_COLORS)]
+            fallback_idx += 1
+        short = model.replace("claude-", "").replace("-20251001", "")
+        model_colors.append((short, color, tokens))
+
+    return Panel(
+        _FullWidthModelBar(model_colors, total),
+        title="[bold]Model Usage[/bold]",
+        border_style="blue",
+        padding=(0, 1),
+    )
+
+
+def _detail_project_panel(records: list[TokenRecord], max_rows: int = 10, bar_width: int = 30) -> Panel:
+    groups = group_by_project(records)
+    rows = []
+    for proj, recs in groups.items():
+        tokens, _ = _sum_tokens(recs)
+        cost, has_unknown = _sum_cost(recs)
+        rows.append((proj, tokens, "~$?.??" if has_unknown else format_cost(cost)))
+
+    rows.sort(key=lambda x: -x[1])
+    rows = rows[:max_rows]
+
+    if not rows:
+        return Panel(
+            Text("  No sessions recorded", style="dim italic"),
+            title="[bold]Projects[/bold]",
+            border_style="dim",
+        )
+
+    max_tok = rows[0][1] or 1
+    medals = ["🥇", "🥈", "🥉"] + ["  "] * 20
+
+    content = Text()
+    for i, (proj, tokens, cost_str) in enumerate(rows):
+        filled = int(tokens / max_tok * bar_width)
+        empty = bar_width - filled
+        medal = medals[i]
+
+        content.append(f"  {medal} ", style="")
+        content.append(f"{proj:<24}", style="bold magenta" if i == 0 else "magenta")
+        content.append("█" * filled, style="bright_cyan" if i == 0 else "cyan")
+        content.append("░" * empty, style="dim")
+        content.append(f"  {tokens:>10,}", style="bold cyan")
+        content.append(f"  {cost_str}", style="green")
+        if i < len(rows) - 1:
+            content.append("\n")
+
+    return Panel(content, title="[bold]Projects[/bold]", border_style="magenta")
+
+
+def _build_detail_renderable(records: list[TokenRecord], config: Config, period: str):
+    """Build the full renderable for a detail view."""
+    from rich.console import Group as RGroup
+
+    now = datetime.now().astimezone()
+
+    if period == "hour":
+        block_start, block_end = current_5h_block(now)
+        title = f"{block_start.strftime('%H:%M')} – {block_end.strftime('%H:%M')}"
+        emoji = "⚡"
+        filtered = filter_current_5h_block(records, now)
+    elif period == "today":
+        title = "Today"
+        emoji = "☀️"
+        filtered = filter_today(records)
+    elif period == "week":
+        title = "This Week"
+        emoji = "📅"
+        filtered = filter_this_week(records)
+    else:
+        title = "This Month"
+        emoji = "📆"
+        filtered = filter_this_month(records)
+
+    tokens, cache = _sum_tokens(filtered)
+    cost, has_unknown = _sum_cost(filtered)
+    cost_str = "~$?.??" if has_unknown else format_cost(cost)
+
+    period_budget, budget_label = _period_budget(config.monthly_token_budget, period, now)
+
+    tz_name = now.strftime("%Z") or now.strftime("%z")
+
+    header = Text(justify="center")
+    header.append(f"{emoji}  {title}", style="bold white")
+    header.append("  ·  ", style="dim")
+    header.append(now.strftime("%Y-%m-%d %H:%M:%S"), style="dim")
+    header.append(f"  {tz_name}", style="dim")
+    header_panel = Panel(Align.center(header), border_style="bright_magenta", padding=(0, 0))
+
+    status = _status_bar(records, now)
+    status_panel = Panel(status, border_style="dim", padding=(0, 0))
+
+    parts = [
+        header_panel,
+        _detail_budget_bar(tokens, period_budget, label=budget_label, cost_str=cost_str, cache=cache),
+        _detail_model_panel(filtered),
+        _detail_project_panel(filtered),
+        _velocity_panel(records, config, now, period=period),
+        status_panel,
+    ]
+    return RGroup(*parts)
+
+
+def show_detail_watch(period: str, interval: int = 5) -> None:
+    """Live-refresh detail dashboard. Ctrl+C to exit."""
+    import shutil
+    import sys
+    from cctoken.parser import load_all_records
+    from cctoken.config import load_config
+
+    sys.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+    sys.stdout.flush()
+
+    watch_console = Console()
+
+    with Live(
+        console=watch_console,
+        refresh_per_second=2,
+        screen=True,
+        vertical_overflow="crop",
+    ) as live:
+        next_refresh = 0.0
+        while True:
+            now = time.monotonic()
+            if now >= next_refresh:
+                records = load_all_records()
+                config = load_config()
+                live.update(_build_detail_renderable(records, config, period))
+                next_refresh = now + interval
+            time.sleep(0.25)
 
 
 # Sparkline block characters (9 levels)
@@ -417,39 +709,162 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}m"
 
 
-def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime) -> Panel:
+def _fmt_duration_period(seconds: float, period: str | None) -> str:
+    """Format duration with period-appropriate granularity."""
+    seconds = int(seconds)
+    d, s = divmod(seconds, 86400)
+    h, s = divmod(s, 3600)
+    m = s // 60
+    if period in ("hour", "today"):
+        # Show hours and minutes
+        total_h = d * 24 + h
+        if total_h:
+            return f"{total_h}h {m}m"
+        return f"{m}m"
+    else:
+        # week, month: show days and hours
+        if d:
+            return f"{d}d {h}h"
+        if h:
+            return f"{h}h {m}m"
+        return f"{m}m"
+
+
+def _burn_hourly_buckets(records: list[TokenRecord], now: datetime) -> list[int]:
+    """24 hourly buckets for the last 24 hours (oldest first)."""
+    from datetime import timedelta
+    buckets = [0] * 24
+    for r in records:
+        local = r.timestamp.astimezone()
+        delta = now - local
+        if timedelta() <= delta < timedelta(hours=24):
+            # hours_ago=0 is current hour → bucket index 23
+            hours_ago = int(delta.total_seconds() // 3600)
+            buckets[23 - min(hours_ago, 23)] += r.display_tokens
+    return buckets
+
+
+def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime, period: str | None = None) -> Panel:
     from rich.console import Group as RGroup
     from datetime import timedelta
 
-    # Burn rate: tokens in the last 24 hours
-    cutoff_24h = now - timedelta(hours=24)
-    recent = [r for r in records if r.timestamp.astimezone() >= cutoff_24h]
-    tokens_24h, _ = _sum_tokens(recent)
-    burn_per_hour = tokens_24h / 24
-
     lines: list = []
 
-    # Burn rate line
-    rate_line = Text()
-    rate_line.append("🔥 ", style="")
-    rate_line.append(f"{burn_per_hour:,.0f}", style="bold yellow")
-    rate_line.append(" tok/hr", style="dim")
-    rate_line.append("  (last 24h avg)", style="dim")
-    lines.append(rate_line)
+    if period == "hour":
+        block_start, block_end = current_5h_block(now)
+        filtered_h = filter_current_5h_block(records, now)
+        tokens, _ = _sum_tokens(filtered_h)
+        elapsed_h = max((now - block_start).total_seconds() / 3600, 0.1)
+        rate = tokens / elapsed_h
+        rate_line = Text()
+        rate_line.append("🔥 ", style="")
+        rate_line.append(f"{rate:,.0f}", style="bold yellow")
+        rate_line.append(" tok/hr", style="dim")
+        rate_line.append(f"  ({block_start.strftime('%H:%M')}–{block_end.strftime('%H:%M')} avg)", style="dim")
+        lines.append(rate_line)
+        # 5 hourly buckets within block
+        start_hour = block_start.hour
+        buckets = [0] * 5
+        for r in filtered_h:
+            h = r.timestamp.astimezone().hour - start_hour
+            buckets[max(0, min(h, 4))] += r.display_tokens
+        lines.append(_Sparkline(buckets, min_width=16, color_high="yellow"))
+        labels = [f"{(start_hour + i) % 24:02d}" for i in range(5)]
+        lines.append(_Axis(labels, min_width=16))
+        burn_per_hour = rate
 
-    # Budget depletion estimate
+    elif period == "today":
+        hours_elapsed = max(now.hour + now.minute / 60, 1)
+        today_r = filter_today(records)
+        tokens, _ = _sum_tokens(today_r)
+        rate = tokens / hours_elapsed
+        rate_line = Text()
+        rate_line.append("🔥 ", style="")
+        rate_line.append(f"{rate:,.0f}", style="bold yellow")
+        rate_line.append(" tok/hr", style="dim")
+        rate_line.append("  (today avg)", style="dim")
+        lines.append(rate_line)
+        today_vals, _ = _today_buckets(records)
+        lines.append(_Sparkline(today_vals, min_width=24, color_high="yellow"))
+        lines.append(_Axis(["0", "6", "12", "18", "23"], min_width=24))
+        burn_per_hour = rate
+
+    elif period == "week":
+        week_r = filter_this_week(records)
+        tokens, _ = _sum_tokens(week_r)
+        days_elapsed = max(now.weekday() + now.hour / 24, 1)
+        rate = tokens / days_elapsed
+        rate_line = Text()
+        rate_line.append("🔥 ", style="")
+        rate_line.append(f"{rate:,.0f}", style="bold yellow")
+        rate_line.append(" tok/day", style="dim")
+        rate_line.append("  (this week avg)", style="dim")
+        lines.append(rate_line)
+        week_vals = _week_buckets(records)
+        lines.append(_Sparkline(week_vals, min_width=16, color_high="yellow"))
+        lines.append(_Axis(["M", "T", "W", "T", "F", "S", "S"], min_width=16))
+        burn_per_hour = rate / 24
+
+    elif period == "month":
+        month_r = filter_this_month(records)
+        tokens, _ = _sum_tokens(month_r)
+        days_elapsed = max(now.day - 1 + now.hour / 24, 1)
+        rate = tokens / days_elapsed
+        rate_line = Text()
+        rate_line.append("🔥 ", style="")
+        rate_line.append(f"{rate:,.0f}", style="bold yellow")
+        rate_line.append(" tok/day", style="dim")
+        rate_line.append("  (this month avg)", style="dim")
+        lines.append(rate_line)
+        import calendar
+        days_in_month = calendar.monthrange(now.year, now.month)[1]
+        daily = [0] * days_in_month
+        for r in month_r:
+            daily[r.timestamp.astimezone().day - 1] += r.display_tokens
+        lines.append(_Sparkline(daily, min_width=16, color_high="yellow"))
+        lines.append(_Axis(["1", str(days_in_month // 2), str(days_in_month)], min_width=16))
+        burn_per_hour = rate / 24
+
+    else:
+        # Main dashboard: 24h view
+        cutoff_24h = now - timedelta(hours=24)
+        recent = [r for r in records if r.timestamp.astimezone() >= cutoff_24h]
+        tokens_24h, _ = _sum_tokens(recent)
+        burn_per_hour = tokens_24h / 24
+        rate_line = Text()
+        rate_line.append("🔥 ", style="")
+        rate_line.append(f"{burn_per_hour:,.0f}", style="bold yellow")
+        rate_line.append(" tok/hr", style="dim")
+        rate_line.append("  (last 24h avg)", style="dim")
+        lines.append(rate_line)
+        burn_buckets = _burn_hourly_buckets(records, now)
+        lines.append(_Sparkline(burn_buckets, min_width=24, color_high="yellow"))
+        h_now = now.hour
+        axis_labels = [f"{(h_now - 23 + i) % 24:02d}" for i in [0, 6, 12, 18, 23]]
+        lines.append(_Axis(axis_labels, min_width=24))
+
+    # Budget depletion estimate — period-specific
     if config.monthly_token_budget is not None:
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_r = [r for r in records if r.timestamp.astimezone() >= month_start]
-        used, _ = _sum_tokens(month_r)
-        remaining = config.monthly_token_budget - used
+        period_budget, _ = _period_budget(config.monthly_token_budget, period or "month", now)
+        # Get period usage
+        if period == "hour":
+            period_used, _ = _sum_tokens(filter_current_5h_block(records, now))
+        elif period == "today":
+            period_used, _ = _sum_tokens(filter_today(records))
+        elif period == "week":
+            period_used, _ = _sum_tokens(filter_this_week(records))
+        else:
+            period_used, _ = _sum_tokens(filter_this_month(records))
+        remaining = (period_budget or 0) - period_used
 
         dep_line = Text()
         if burn_per_hour > 0 and remaining > 0:
             hours_left = remaining / burn_per_hour
+            secs = hours_left * 3600
             dep_line.append("📉 ", style="")
             dep_line.append("budget runs out in ", style="dim")
-            dep_line.append(_fmt_duration(hours_left * 3600), style="bold red" if hours_left < 24 else "bold cyan")
+            is_critical = hours_left < 1 if period == "hour" else hours_left < 24
+            dep_line.append(_fmt_duration_period(secs, period), style="bold red" if is_critical else "bold cyan")
             dep_line.append(f"  ({remaining:,} tok left)", style="dim")
         elif remaining <= 0:
             dep_line.append("🚨 ", style="")
@@ -459,14 +874,39 @@ def _velocity_panel(records: list[TokenRecord], config: Config, now: datetime) -
             dep_line.append("no recent activity to estimate", style="dim")
         lines.append(dep_line)
 
-    # Reset countdown
-    if config.billing_reset_day is not None:
+    # Reset countdown — period-specific
+    if period == "hour":
+        _, block_end = current_5h_block(now)
+        secs_left = (block_end - now).total_seconds()
+        reset_line = Text()
+        reset_line.append("🔄 ", style="")
+        reset_line.append(f"resets at {block_end.strftime('%H:%M')} in ", style="dim")
+        reset_line.append(_fmt_duration_period(secs_left, "hour"), style="bold green")
+        lines.append(reset_line)
+    elif period == "today":
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        secs_left = (tomorrow - now).total_seconds()
+        reset_line = Text()
+        reset_line.append("🔄 ", style="")
+        reset_line.append("resets at midnight in ", style="dim")
+        reset_line.append(_fmt_duration_period(secs_left, "today"), style="bold green")
+        lines.append(reset_line)
+    elif period == "week":
+        days_until_mon = (7 - now.weekday()) % 7 or 7
+        next_mon = (now + timedelta(days=days_until_mon)).replace(hour=0, minute=0, second=0, microsecond=0)
+        secs_left = (next_mon - now).total_seconds()
+        reset_line = Text()
+        reset_line.append("🔄 ", style="")
+        reset_line.append("resets next Monday in ", style="dim")
+        reset_line.append(_fmt_duration_period(secs_left, "week"), style="bold green")
+        lines.append(reset_line)
+    elif config.billing_reset_day is not None:
         reset_dt = _next_reset(config.billing_reset_day, now)
         secs_left = (reset_dt - now).total_seconds()
         reset_line = Text()
         reset_line.append("🔄 ", style="")
         reset_line.append("resets in ", style="dim")
-        reset_line.append(_fmt_duration(secs_left), style="bold green")
+        reset_line.append(_fmt_duration_period(secs_left, period or "month"), style="bold green")
         reset_line.append(f"  ({reset_dt.strftime('%b %d')})", style="dim")
         lines.append(reset_line)
     else:
@@ -511,9 +951,11 @@ def _build_watch_renderable(
     month_r = filter_this_month(records)
 
     # ── Header ────────────────────────────────────────────────────────────────
+    tz_name = now.strftime("%Z") or now.strftime("%z")
     header = Text(justify="center")
     header.append("⚡ Claude Code Token Monitor  ", style="bold white")
     header.append(now.strftime("%Y-%m-%d  %H:%M:%S"), style="dim")
+    header.append(f"  {tz_name}", style="dim")
     header_panel = Panel(Align.center(header), border_style="bright_magenta", padding=(0, 0))
 
     # ── Stat cards ────────────────────────────────────────────────────────────

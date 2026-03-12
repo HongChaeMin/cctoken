@@ -12,7 +12,7 @@ if str(_project_root) not in sys.path:
 
 from cctoken.parser import load_all_records
 from cctoken.config import load_config, save_budget, save_reset_day
-from cctoken.display import show_summary, show_projects, show_trend, show_budget, show_watch
+from cctoken.display import show_summary, show_projects, show_trend, show_budget, show_watch, show_detail_watch
 
 
 def cmd_summary(_args):
@@ -29,6 +29,13 @@ def cmd_projects(_args):
 def cmd_trend(_args):
     records = load_all_records()
     show_trend(records)
+
+
+def cmd_detail(args):
+    try:
+        show_detail_watch(period=args.cmd, interval=5)
+    except KeyboardInterrupt:
+        pass
 
 
 def cmd_watch(_args):
@@ -70,6 +77,10 @@ def main():
     )
     sub = parser.add_subparsers(dest="cmd")
 
+    sub.add_parser("hour", help="Live view: last 5 hours usage")
+    sub.add_parser("today", help="Live view: today's usage")
+    sub.add_parser("week", help="Live view: this week's usage")
+    sub.add_parser("month", help="Live view: this month's usage")
     sub.add_parser("projects", help="Per-project breakdown (month-to-date)")
     sub.add_parser("trend", help="Hourly usage heatmap (last 7 days)")
     sub.add_parser("watch", help="Live dashboard, refreshes every 5s (Ctrl+C to exit)")
@@ -85,7 +96,9 @@ def main():
     args = parser.parse_args()
 
     if args.cmd is None:
-        cmd_summary(args)
+        cmd_watch(args)
+    elif args.cmd in ("hour", "today", "week", "month"):
+        cmd_detail(args)
     elif args.cmd == "projects":
         cmd_projects(args)
     elif args.cmd == "trend":
